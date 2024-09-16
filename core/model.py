@@ -1,24 +1,33 @@
-"""
-StarGAN v2
-Copyright (c) 2020-present NAVER Corp.
-
-This work is licensed under the Creative Commons Attribution-NonCommercial
-4.0 International License. To view a copy of this license, visit
-http://creativecommons.org/licenses/by-nc/4.0/ or send a letter to
-Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
-"""
-
 import copy
 import math
-
 from munch import Munch
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from core.wing import FAN
 
+# Self-attention module added
+class SelfAttention(nn.Module):
+    def __init__(self, in_dim):
+        super(SelfAttention, self).__init__()
+        self.query = nn.Conv2d(in_dim, in_dim // 8, kernel_size=1)
+        self.key = nn.Conv2d(in_dim, in_dim // 8, kernel_size=1)
+        self.value = nn.Conv2d(in_dim, in_dim, kernel_size=1)
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        B, C, W, H = x.size()
+        proj_query = self.query(x).view(B, -1, W * H).permute(0, 2, 1)
+        proj_key = self.key(x).view(B, -1, W * H)
+        energy = torch.bmm(proj_query, proj_key)
+        attention = F.softmax(energy, dim=-1)
+
+        proj_value = self.value(x).view(B, -1, W * H)
+        out = torch.bmm(proj_value, attention.permute(0, 2, 1))
+        out = out.view(B, C, W, H)
+        out = self.gamma * out + x
+        return out
 
 class ResBlk(nn.Module):
     def __init__(self, dim_in, dim_out, actv=nn.LeakyReLU(0.2),
@@ -141,6 +150,7 @@ class Generator(nn.Module):
         self.from_rgb = nn.Conv2d(3, dim_in, 3, 1, 1)
         self.encode = nn.ModuleList()
         self.decode = nn.ModuleList()
+        self.attention_layer = SelfAttention(dim_in)  # Added attention layer
         self.to_rgb = nn.Sequential(
             nn.InstanceNorm2d(dim_in, affine=True),
             nn.LeakyReLU(0.2),
@@ -152,23 +162,17 @@ class Generator(nn.Module):
             repeat_num += 1
         for _ in range(repeat_num):
             dim_out = min(dim_in*2, max_conv_dim)
-            self.encode.append(
-                ResBlk(dim_in, dim_out, normalize=True, downsample=True))
-            self.decode.insert(
-                0, AdainResBlk(dim_out, dim_in, style_dim,
-                               w_hpf=w_hpf, upsample=True))  # stack-like
+            self.encode.append(ResBlk(dim_in, dim_out, normalize=True, downsample=True))
+            self.decode.insert(0, AdainResBlk(dim_out, dim_in, style_dim, w_hpf=w_hpf, upsample=True))  
             dim_in = dim_out
 
         # bottleneck blocks
         for _ in range(2):
-            self.encode.append(
-                ResBlk(dim_out, dim_out, normalize=True))
-            self.decode.insert(
-                0, AdainResBlk(dim_out, dim_out, style_dim, w_hpf=w_hpf))
+            self.encode.append(ResBlk(dim_out, dim_out, normalize=True))
+            self.decode.insert(0, AdainResBlk(dim_out, dim_out, style_dim, w_hpf=w_hpf))
 
         if w_hpf > 0:
-            device = torch.device(
-                'cuda' if torch.cuda.is_available() else 'cpu')
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             self.hpf = HighPass(w_hpf, device)
 
     def forward(self, x, s, masks=None):
@@ -178,6 +182,7 @@ class Generator(nn.Module):
             if (masks is not None) and (x.size(2) in [32, 64, 128]):
                 cache[x.size(2)] = x
             x = block(x)
+        x = self.attention_layer(x)  # Add attention before decoding
         for block in self.decode:
             x = block(x, s)
             if (masks is not None) and (x.size(2) in [32, 64, 128]):
