@@ -1,10 +1,23 @@
+"""
+StarGAN v2
+Copyright (c) 2020-present NAVER Corp.
+
+This work is licensed under the Creative Commons Attribution-NonCommercial
+4.0 International License. To view a copy of this license, visit
+http://creativecommons.org/licenses/by-nc/4.0/ or send a letter to
+Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
+"""
+
 import copy
 import math
+
+from munch import Munch
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-from munch import Munch
+
+from core.wing import FAN
 
 
 class ResBlk(nn.Module):
@@ -48,7 +61,7 @@ class ResBlk(nn.Module):
 
     def forward(self, x):
         x = self._shortcut(x) + self._residual(x)
-        return x / math.sqrt(2)
+        return x / math.sqrt(2)  # unit variance
 
 
 class AdaIN(nn.Module):
@@ -64,42 +77,60 @@ class AdaIN(nn.Module):
         return (1 + gamma) * self.norm(x) + beta
 
 
-class RRDB(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(RRDB, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, 1, 1)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, 1, 1)
-        self.conv3 = nn.Conv2d(out_channels, out_channels, 3, 1, 1)
-        self.lrelu = nn.LeakyReLU(0.2, inplace=True)
+class AdainResBlk(nn.Module):
+    def __init__(self, dim_in, dim_out, style_dim=64, w_hpf=0,
+                 actv=nn.LeakyReLU(0.2), upsample=False):
+        super().__init__()
+        self.w_hpf = w_hpf
+        self.actv = actv
+        self.upsample = upsample
+        self.learned_sc = dim_in != dim_out
+        self._build_weights(dim_in, dim_out, style_dim)
 
-    def forward(self, x):
-        identity = x
-        out = self.lrelu(self.conv1(x))
-        out = self.lrelu(self.conv2(out))
-        out = self.conv3(out)
-        return out * 0.2 + identity
+    def _build_weights(self, dim_in, dim_out, style_dim=64):
+        self.conv1 = nn.Conv2d(dim_in, dim_out, 3, 1, 1)
+        self.conv2 = nn.Conv2d(dim_out, dim_out, 3, 1, 1)
+        self.norm1 = AdaIN(style_dim, dim_in)
+        self.norm2 = AdaIN(style_dim, dim_out)
+        if self.learned_sc:
+            self.conv1x1 = nn.Conv2d(dim_in, dim_out, 1, 1, 0, bias=False)
 
+    def _shortcut(self, x):
+        if self.upsample:
+            x = F.interpolate(x, scale_factor=2, mode='nearest')
+        if self.learned_sc:
+            x = self.conv1x1(x)
+        return x
 
-class SelfAttention(nn.Module):
-    def __init__(self, in_dim):
-        super(SelfAttention, self).__init__()
-        self.query_conv = nn.Conv2d(in_channels=in_dim, out_channels=in_dim // 8, kernel_size=1)
-        self.key_conv = nn.Conv2d(in_channels=in_dim, out_channels=in_dim // 8, kernel_size=1)
-        self.value_conv = nn.Conv2d(in_channels=in_dim, out_channels=in_dim, kernel_size=1)
-        self.gamma = nn.Parameter(torch.zeros(1))
+    def _residual(self, x, s):
+        x = self.norm1(x, s)
+        x = self.actv(x)
+        if self.upsample:
+            x = F.interpolate(x, scale_factor=2, mode='nearest')
+        x = self.conv1(x)
+        x = self.norm2(x, s)
+        x = self.actv(x)
+        x = self.conv2(x)
+        return x
 
-    def forward(self, x):
-        batch_size, C, width, height = x.size()
-        proj_query = self.query_conv(x).view(batch_size, -1, width * height).permute(0, 2, 1)
-        proj_key = self.key_conv(x).view(batch_size, -1, width * height)
-        energy = torch.bmm(proj_query, proj_key)
-        attention = F.softmax(energy, dim=-1)
-        proj_value = self.value_conv(x).view(batch_size, -1, width * height)
-
-        out = torch.bmm(proj_value, attention.permute(0, 2, 1))
-        out = out.view(batch_size, C, width, height)
-        out = self.gamma * out + x
+    def forward(self, x, s):
+        out = self._residual(x, s)
+        if self.w_hpf == 0:
+            out = (out + self._shortcut(x)) / math.sqrt(2)
         return out
+
+
+class HighPass(nn.Module):
+    def __init__(self, w_hpf, device):
+        super(HighPass, self).__init__()
+        self.register_buffer('filter',
+                             torch.tensor([[-1, -1, -1],
+                                           [-1, 8., -1],
+                                           [-1, -1, -1]]) / w_hpf)
+
+    def forward(self, x):
+        filter = self.filter.unsqueeze(0).unsqueeze(1).repeat(x.size(1), 1, 1, 1)
+        return F.conv2d(x, filter, padding=1, groups=x.size(1))
 
 
 class Generator(nn.Module):
@@ -124,18 +155,16 @@ class Generator(nn.Module):
             self.encode.append(
                 ResBlk(dim_in, dim_out, normalize=True, downsample=True))
             self.decode.insert(
-                0, AdaINResBlk(dim_out, dim_in, style_dim,
-                               w_hpf=w_hpf, upsample=True))
+                0, AdainResBlk(dim_out, dim_in, style_dim,
+                               w_hpf=w_hpf, upsample=True))  # stack-like
             dim_in = dim_out
 
         # bottleneck blocks
         for _ in range(2):
             self.encode.append(
-                RRDB(dim_out, dim_out))
+                ResBlk(dim_out, dim_out, normalize=True))
             self.decode.insert(
-                0, RRDB(dim_out, dim_out))
-
-        self.attn = SelfAttention(dim_out)
+                0, AdainResBlk(dim_out, dim_out, style_dim, w_hpf=w_hpf))
 
         if w_hpf > 0:
             device = torch.device(
@@ -149,7 +178,6 @@ class Generator(nn.Module):
             if (masks is not None) and (x.size(2) in [32, 64, 128]):
                 cache[x.size(2)] = x
             x = block(x)
-        x = self.attn(x)
         for block in self.decode:
             x = block(x, s)
             if (masks is not None) and (x.size(2) in [32, 64, 128]):
@@ -157,3 +185,122 @@ class Generator(nn.Module):
                 mask = F.interpolate(mask, size=x.size(2), mode='bilinear')
                 x = x + self.hpf(mask * cache[x.size(2)])
         return self.to_rgb(x)
+
+
+class MappingNetwork(nn.Module):
+    def __init__(self, latent_dim=16, style_dim=64, num_domains=2):
+        super().__init__()
+        layers = []
+        layers += [nn.Linear(latent_dim, 512)]
+        layers += [nn.ReLU()]
+        for _ in range(3):
+            layers += [nn.Linear(512, 512)]
+            layers += [nn.ReLU()]
+        self.shared = nn.Sequential(*layers)
+
+        self.unshared = nn.ModuleList()
+        for _ in range(num_domains):
+            self.unshared += [nn.Sequential(nn.Linear(512, 512),
+                                            nn.ReLU(),
+                                            nn.Linear(512, 512),
+                                            nn.ReLU(),
+                                            nn.Linear(512, 512),
+                                            nn.ReLU(),
+                                            nn.Linear(512, style_dim))]
+
+    def forward(self, z, y):
+        h = self.shared(z)
+        out = []
+        for layer in self.unshared:
+            out += [layer(h)]
+        out = torch.stack(out, dim=1)  # (batch, num_domains, style_dim)
+        idx = torch.LongTensor(range(y.size(0))).to(y.device)
+        s = out[idx, y]  # (batch, style_dim)
+        return s
+
+
+class StyleEncoder(nn.Module):
+    def __init__(self, img_size=256, style_dim=64, num_domains=2, max_conv_dim=512):
+        super().__init__()
+        dim_in = 2**14 // img_size
+        blocks = []
+        blocks += [nn.Conv2d(3, dim_in, 3, 1, 1)]
+
+        repeat_num = int(np.log2(img_size)) - 2
+        for _ in range(repeat_num):
+            dim_out = min(dim_in*2, max_conv_dim)
+            blocks += [ResBlk(dim_in, dim_out, downsample=True)]
+            dim_in = dim_out
+
+        blocks += [nn.LeakyReLU(0.2)]
+        blocks += [nn.Conv2d(dim_out, dim_out, 4, 1, 0)]
+        blocks += [nn.LeakyReLU(0.2)]
+        self.shared = nn.Sequential(*blocks)
+
+        self.unshared = nn.ModuleList()
+        for _ in range(num_domains):
+            self.unshared += [nn.Linear(dim_out, style_dim)]
+
+    def forward(self, x, y):
+        h = self.shared(x)
+        h = h.view(h.size(0), -1)
+        out = []
+        for layer in self.unshared:
+            out += [layer(h)]
+        out = torch.stack(out, dim=1)  # (batch, num_domains, style_dim)
+        idx = torch.LongTensor(range(y.size(0))).to(y.device)
+        s = out[idx, y]  # (batch, style_dim)
+        return s
+
+
+class Discriminator(nn.Module):
+    def __init__(self, img_size=256, num_domains=2, max_conv_dim=512):
+        super().__init__()
+        dim_in = 2**14 // img_size
+        blocks = []
+        blocks += [nn.Conv2d(3, dim_in, 3, 1, 1)]
+
+        repeat_num = int(np.log2(img_size)) - 2
+        for _ in range(repeat_num):
+            dim_out = min(dim_in*2, max_conv_dim)
+            blocks += [ResBlk(dim_in, dim_out, downsample=True)]
+            dim_in = dim_out
+
+        blocks += [nn.LeakyReLU(0.2)]
+        blocks += [nn.Conv2d(dim_out, dim_out, 4, 1, 0)]
+        blocks += [nn.LeakyReLU(0.2)]
+        blocks += [nn.Conv2d(dim_out, num_domains, 1, 1, 0)]
+        self.main = nn.Sequential(*blocks)
+
+    def forward(self, x, y):
+        out = self.main(x)
+        out = out.view(out.size(0), -1)  # (batch, num_domains)
+        idx = torch.LongTensor(range(y.size(0))).to(y.device)
+        out = out[idx, y]  # (batch)
+        return out
+
+
+def build_model(args):
+    generator = nn.DataParallel(Generator(args.img_size, args.style_dim, w_hpf=args.w_hpf))
+    mapping_network = nn.DataParallel(MappingNetwork(args.latent_dim, args.style_dim, args.num_domains))
+    style_encoder = nn.DataParallel(StyleEncoder(args.img_size, args.style_dim, args.num_domains))
+    discriminator = nn.DataParallel(Discriminator(args.img_size, args.num_domains))
+    generator_ema = copy.deepcopy(generator)
+    mapping_network_ema = copy.deepcopy(mapping_network)
+    style_encoder_ema = copy.deepcopy(style_encoder)
+
+    nets = Munch(generator=generator,
+                 mapping_network=mapping_network,
+                 style_encoder=style_encoder,
+                 discriminator=discriminator)
+    nets_ema = Munch(generator=generator_ema,
+                     mapping_network=mapping_network_ema,
+                     style_encoder=style_encoder_ema)
+
+    if args.w_hpf > 0:
+        fan = nn.DataParallel(FAN(fname_pretrained=args.wing_path).eval())
+        fan.get_heatmap = fan.module.get_heatmap
+        nets.fan = fan
+        nets_ema.fan = fan
+
+    return nets, nets_ema
