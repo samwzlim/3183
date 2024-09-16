@@ -1,7 +1,7 @@
 import argparse
 import os
 from munch import Munch
-from solver import Solver
+from core.solver import Solver
 from data_loader import get_train_loader, get_eval_loader, get_test_loader
 
 
