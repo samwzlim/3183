@@ -23,7 +23,7 @@ from core.checkpoint import CheckpointIO
 from core.data_loader import InputFetcher
 import core.utils as utils
 from metrics.eval import calculate_metrics
-from torchvision import models
+
 
 class Solver(nn.Module):
     def __init__(self, args):
@@ -31,15 +31,8 @@ class Solver(nn.Module):
         self.args = args
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        # Existing code to build models
         self.nets, self.nets_ema = build_model(args)
-
-        # Load pre-trained VGG model for perceptual loss
-        self.vgg = models.vgg16(pretrained=True).features[:16].eval().to(self.device)
-        for param in self.vgg.parameters():
-            param.requires_grad = False
-
-        # Register networks and initialize optimizers
+        # below setattrs are to make networks be children of Solver, e.g., for self.to(self.device)
         for name, module in self.nets.items():
             utils.print_network(module, name)
             setattr(self, name, module)
@@ -237,7 +230,7 @@ def compute_g_loss(nets, args, x_real, y_org, y_trg, z_trgs=None, x_refs=None, m
     if x_refs is not None:
         x_ref, x_ref2 = x_refs
 
-    # Existing adversarial loss
+    # adversarial loss
     if z_trgs is not None:
         s_trg = nets.mapping_network(z_trg, y_trg)
     else:
@@ -247,11 +240,11 @@ def compute_g_loss(nets, args, x_real, y_org, y_trg, z_trgs=None, x_refs=None, m
     out = nets.discriminator(x_fake, y_trg)
     loss_adv = adv_loss(out, 1)
 
-    # Existing style reconstruction loss
+    # style reconstruction loss
     s_pred = nets.style_encoder(x_fake, y_trg)
     loss_sty = torch.mean(torch.abs(s_pred - s_trg))
 
-    # Existing diversity sensitive loss
+    # diversity sensitive loss
     if z_trgs is not None:
         s_trg2 = nets.mapping_network(z_trg2, y_trg)
     else:
@@ -260,28 +253,18 @@ def compute_g_loss(nets, args, x_real, y_org, y_trg, z_trgs=None, x_refs=None, m
     x_fake2 = x_fake2.detach()
     loss_ds = torch.mean(torch.abs(x_fake - x_fake2))
 
-    # Existing cycle-consistency loss
+    # cycle-consistency loss
     masks = nets.fan.get_heatmap(x_fake) if args.w_hpf > 0 else None
     s_org = nets.style_encoder(x_real, y_org)
     x_rec = nets.generator(x_fake, s_org, masks=masks)
     loss_cyc = torch.mean(torch.abs(x_rec - x_real))
 
-    # New Perceptual Loss
-    def perceptual_loss(x, y):
-        return torch.mean(torch.abs(self.vgg(x) - self.vgg(y)))
-
-    loss_perc = perceptual_loss(x_fake, x_real)
-
-    # Combine all losses
     loss = loss_adv + args.lambda_sty * loss_sty \
-        - args.lambda_ds * loss_ds + args.lambda_cyc * loss_cyc + args.lambda_perc * loss_perc
-    
+        - args.lambda_ds * loss_ds + args.lambda_cyc * loss_cyc
     return loss, Munch(adv=loss_adv.item(),
                        sty=loss_sty.item(),
                        ds=loss_ds.item(),
-                       cyc=loss_cyc.item(),
-                       perc=loss_perc.item())
-
+                       cyc=loss_cyc.item())
 
 
 def moving_average(model, model_test, beta=0.999):

@@ -108,9 +108,6 @@ if __name__ == '__main__':
                         help='Number of iterations to optimize diversity sensitive loss')
     parser.add_argument('--w_hpf', type=float, default=1,
                         help='weight for high-pass filtering')
-    # Add this in your argument parser setup
-    parser.add_argument('--lambda_perc', type=float, default=0.1, help='weight for perceptual loss')
-
 
     # training arguments
     parser.add_argument('--randcrop_prob', type=float, default=0.5,
