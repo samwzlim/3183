@@ -2,7 +2,7 @@ import argparse
 import os
 from munch import Munch
 from core.solver import Solver
-from data_loader import get_train_loader, get_eval_loader, get_test_loader
+from core.data_loader import get_train_loader, get_eval_loader, get_test_loader
 
 
 def parse_args():
