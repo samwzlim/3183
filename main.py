@@ -4,7 +4,6 @@ from munch import Munch
 from core.solver import Solver
 from core.data_loader import get_train_loader, get_eval_loader, get_test_loader
 
-
 def parse_args():
     parser = argparse.ArgumentParser()
 
@@ -13,6 +12,9 @@ def parse_args():
     parser.add_argument('--val_img_dir', type=str, default='data/celeba_hq/val', help='Directory containing validation images')
     parser.add_argument('--src_dir', type=str, default='assets/representative/celeba_hq/src', help='Source directory for test images')
     parser.add_argument('--ref_dir', type=str, default='assets/representative/celeba_hq/ref', help='Reference directory for test images')
+
+    # New argument for number of domains
+    parser.add_argument('--num_domains', type=int, default=2, help='Number of domains (e.g., attributes) for StarGAN v2')
 
     # Training parameters
     parser.add_argument('--img_size', type=int, default=256, help='Image resolution')
@@ -36,7 +38,7 @@ def parse_args():
     parser.add_argument('--lambda_perc', type=float, default=10.0, help='Weight for perceptual loss')
     parser.add_argument('--lambda_id', type=float, default=5.0, help='Weight for identity loss')
 
-    # Misc
+    # Miscellaneous parameters
     parser.add_argument('--mode', type=str, required=True, choices=['train', 'sample', 'eval'], help='Mode of operation: train, sample, eval')
     parser.add_argument('--sample_dir', type=str, default='expr/samples', help='Directory for saving generated samples')
     parser.add_argument('--checkpoint_dir', type=str, default='expr/checkpoints', help='Directory for saving model checkpoints')
@@ -52,7 +54,6 @@ def parse_args():
     parser.add_argument('--eval_every', type=int, default=50000, help='Evaluate FID and LPIPS every N iterations')
 
     return parser.parse_args()
-
 
 def main(args):
     # Initialize the solver
@@ -80,7 +81,6 @@ def main(args):
     elif args.mode == 'eval':
         # Evaluation mode
         solver.evaluate()
-
 
 if __name__ == '__main__':
     args = parse_args()
