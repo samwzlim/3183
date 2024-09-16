@@ -1,17 +1,21 @@
 import os
+from os.path import join as ospj
 import time
 import datetime
-from os.path import join as ospj
+from munch import Munch
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from munch import Munch
+
 from core.model import build_model
 from core.checkpoint import CheckpointIO
 from core.data_loader import InputFetcher
 import core.utils as utils
 from metrics.eval import calculate_metrics
-import lpips  # Added LPIPS import for perceptual loss
+
+# Importing VGG for perceptual loss
+from torchvision.models import vgg16
 
 
 class Solver(nn.Module):
@@ -20,13 +24,22 @@ class Solver(nn.Module):
         self.args = args
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+        # Build models
         self.nets, self.nets_ema = build_model(args)
+
+        # VGG for perceptual loss
+        self.vgg = vgg16(pretrained=True).features[:16].to(self.device).eval()  
+        for param in self.vgg.parameters():
+            param.requires_grad = False  # Freeze VGG parameters
+
+        # Print and initialize network
         for name, module in self.nets.items():
             utils.print_network(module, name)
             setattr(self, name, module)
         for name, module in self.nets_ema.items():
             setattr(self, name + '_ema', module)
 
+        # Optimizers
         if args.mode == 'train':
             self.optims = Munch()
             for net in self.nets.keys():
@@ -45,11 +58,11 @@ class Solver(nn.Module):
         else:
             self.ckptios = [CheckpointIO(ospj(args.checkpoint_dir, '{:06d}_nets_ema.ckpt'), data_parallel=True, **self.nets_ema)]
 
-        self.lpips_fn = lpips.LPIPS(net='alex').to(self.device)  # Initialize LPIPS loss
         self.to(self.device)
         for name, network in self.named_children():
+            # Do not initialize the FAN parameters
             if ('ema' not in name) and ('fan' not in name):
-                print(f'Initializing {name}...')
+                print('Initializing %s...' % name)
                 network.apply(utils.he_init)
 
     def _save_checkpoint(self, step):
@@ -63,6 +76,12 @@ class Solver(nn.Module):
     def _reset_grad(self):
         for optim in self.optims.values():
             optim.zero_grad()
+
+    def compute_perceptual_loss(self, x_real, x_fake):
+        features_real = self.vgg(x_real)
+        features_fake = self.vgg(x_fake)
+        perceptual_loss = F.l1_loss(features_real, features_fake)
+        return perceptual_loss
 
     def train(self, loaders):
         args = self.args
@@ -93,21 +112,21 @@ class Solver(nn.Module):
 
             masks = nets.fan.get_heatmap(x_real) if args.w_hpf > 0 else None
 
-            # train the discriminator
-            d_loss, d_losses_latent = self.compute_d_loss(
+            # Train the discriminator
+            d_loss, d_losses_latent = compute_d_loss(
                 nets, args, x_real, y_org, y_trg, z_trg=z_trg, masks=masks)
             self._reset_grad()
             d_loss.backward()
             optims.discriminator.step()
 
-            d_loss, d_losses_ref = self.compute_d_loss(
+            d_loss, d_losses_ref = compute_d_loss(
                 nets, args, x_real, y_org, y_trg, x_ref=x_ref, masks=masks)
             self._reset_grad()
             d_loss.backward()
             optims.discriminator.step()
 
-            # train the generator
-            g_loss, g_losses_latent = self.compute_g_loss(
+            # Train the generator
+            g_loss, g_losses_latent = compute_g_loss(
                 nets, args, x_real, y_org, y_trg, z_trgs=[z_trg, z_trg2], masks=masks)
             self._reset_grad()
             g_loss.backward()
@@ -115,22 +134,22 @@ class Solver(nn.Module):
             optims.mapping_network.step()
             optims.style_encoder.step()
 
-            g_loss, g_losses_ref = self.compute_g_loss(
+            g_loss, g_losses_ref = compute_g_loss(
                 nets, args, x_real, y_org, y_trg, x_refs=[x_ref, x_ref2], masks=masks)
             self._reset_grad()
             g_loss.backward()
             optims.generator.step()
 
-            # compute moving average of network parameters
+            # Compute moving average of network parameters
             moving_average(nets.generator, nets_ema.generator, beta=0.999)
             moving_average(nets.mapping_network, nets_ema.mapping_network, beta=0.999)
             moving_average(nets.style_encoder, nets_ema.style_encoder, beta=0.999)
 
-            # decay weight for diversity sensitive loss
+            # Decay weight for diversity-sensitive loss
             if args.lambda_ds > 0:
                 args.lambda_ds -= (initial_lambda_ds / args.ds_iter)
 
-            # print out log info
+            # Print out log info
             if (i + 1) % args.print_every == 0:
                 elapsed = time.time() - start_time
                 elapsed = str(datetime.timedelta(seconds=elapsed))[:-7]
@@ -144,16 +163,16 @@ class Solver(nn.Module):
                 log += ' '.join(['%s: [%.4f]' % (key, value) for key, value in all_losses.items()])
                 print(log)
 
-            # generate images for debugging
+            # Generate images for debugging
             if (i + 1) % args.sample_every == 0:
                 os.makedirs(args.sample_dir, exist_ok=True)
                 utils.debug_image(nets_ema, args, inputs=inputs_val, step=i + 1)
 
-            # save model checkpoints
+            # Save model checkpoints
             if (i + 1) % args.save_every == 0:
                 self._save_checkpoint(step=i + 1)
 
-            # compute FID and LPIPS if necessary
+            # Compute FID and LPIPS if necessary
             if (i + 1) % args.eval_every == 0:
                 calculate_metrics(nets_ema, args, i + 1, mode='latent')
                 calculate_metrics(nets_ema, args, i + 1, mode='reference')
@@ -185,85 +204,100 @@ class Solver(nn.Module):
         calculate_metrics(nets_ema, args, step=resume_iter, mode='latent')
         calculate_metrics(nets_ema, args, step=resume_iter, mode='reference')
 
-    def compute_d_loss(self, nets, args, x_real, y_org, y_trg, z_trg=None, x_ref=None, masks=None):
-        assert (z_trg is None) != (x_ref is None)
-        # with real images
-        x_real.requires_grad_()
-        out = nets.discriminator(x_real, y_org)
-        loss_real = adv_loss(out, 1)
-        loss_reg = r1_reg(out, x_real)
 
-        # with fake images
-        with torch.no_grad():
-            if z_trg is not None:
-                s_trg = nets.mapping_network(z_trg, y_trg)
-            else:  # x_ref is not None
-                s_trg = nets.style_encoder(x_ref, y_trg)
+def compute_d_loss(nets, args, x_real, y_org, y_trg, z_trg=None, x_ref=None, masks=None):
+    assert (z_trg is None) != (x_ref is None)
+    # with real images
+    x_real.requires_grad_()
+    out = nets.discriminator(x_real, y_org)
+    loss_real = adv_loss(out, 1)
+    loss_reg = r1_reg(out, x_real)
 
-            x_fake = nets.generator(x_real, s_trg, masks=masks)
-        out = nets.discriminator(x_fake, y_trg)
-        loss_fake = adv_loss(out, 0)
-
-        loss = loss_real + loss_fake + args.lambda_reg * loss_reg
-        return loss, Munch(real=loss_real.item(),
-                           fake=loss_fake.item(),
-                           reg=loss_reg.item())
-
-    def compute_g_loss(self, nets, args, x_real, y_org, y_trg, z_trgs=None, x_refs=None, masks=None):
-        assert (z_trgs is None) != (x_refs is None)
-        if z_trgs is not None:
-            z_trg, z_trg2 = z_trgs
-        if x_refs is not None:
-            x_ref, x_ref2 = x_refs
-
-        # adversarial loss
-        if z_trgs is not None:
+    # with fake images
+    with torch.no_grad():
+        if z_trg is not None:
             s_trg = nets.mapping_network(z_trg, y_trg)
-        else:
+        else:  # x_ref is not None
             s_trg = nets.style_encoder(x_ref, y_trg)
 
         x_fake = nets.generator(x_real, s_trg, masks=masks)
-        out = nets.discriminator(x_fake, y_trg)
-        loss_adv = adv_loss(out, 1)
+    out = nets.discriminator(x_fake, y_trg)
+    loss_fake = adv_loss(out, 0)
 
-        # style reconstruction loss
-        s_pred = nets.style_encoder(x_fake, y_trg)
-        loss_sty = torch.mean(torch.abs(s_pred - s_trg))
+    loss = loss_real + loss_fake + args.lambda_reg * loss_reg
+    return loss, Munch(real=loss_real.item(),
+                       fake=loss_fake.item(),
+                       reg=loss_reg.item())
 
-        # diversity sensitive loss (LPIPS)
-        if z_trgs is not None:
-            s_trg2 = nets.mapping_network(z_trg2, y_trg)
-        else:
-            s_trg2 = nets.style_encoder(x_ref2, y_trg)
-        x_fake2 = nets.generator(x_real, s_trg2, masks=masks)
-        x_fake2 = x_fake2.detach()
-        loss_ds = self.lpips_fn(x_fake, x_fake2).mean()  # LPIPS instead of L1
 
-        # cycle-consistency loss
-        masks = nets.fan.get_heatmap(x_fake) if args.w_hpf > 0 else None
-        s_org = nets.style_encoder(x_real, y_org)
-        x_rec = nets.generator(x_fake, s_org, masks=masks)
-        loss_cyc = torch.mean(torch.abs(x_rec - x_real))
+def compute_g_loss(nets, args, x_real, y_org, y_trg, z_trgs=None, x_refs=None, masks=None):
+    assert (z_trgs is None) != (x_refs is None)
+    if z_trgs is not None:
+        z_trg, z_trg2 = z_trgs
+    if x_refs is not None:
+        x_ref, x_ref2 = x_refs
 
-        # Perceptual loss
-        loss_perc = self.lpips_fn(x_fake, x_ref).mean()
+    # adversarial loss
+    if z_trgs is not None:
+        s_trg = nets.mapping_network(z_trg, y_trg)
+    else:
+        s_trg = nets.style_encoder(x_ref, y_trg)
 
-        loss = loss_adv + args.lambda_sty * loss_sty - args.lambda_ds * loss_ds + args.lambda_cyc * loss_cyc + args.lambda_perc * loss_perc
-        return loss, Munch(adv=loss_adv.item(),
-                           sty=loss_sty.item(),
-                           ds=loss_ds.item(),
-                           cyc=loss_cyc.item(),
-                           perc=loss_perc.item())
+    x_fake = nets.generator(x_real, s_trg, masks=masks)
+    out = nets.discriminator(x_fake, y_trg)
+    loss_adv = adv_loss(out, 1)
+
+    # style reconstruction loss
+    s_pred = nets.style_encoder(x_fake, y_trg)
+    loss_sty = torch.mean(torch.abs(s_pred - s_trg))
+
+    # diversity-sensitive loss
+    if z_trgs is not None:
+        s_trg2 = nets.mapping_network(z_trg2, y_trg)
+    else:
+        s_trg2 = nets.style_encoder(x_ref2, y_trg)
+    x_fake2 = nets.generator(x_real, s_trg2, masks=masks)
+    x_fake2 = x_fake2.detach()
+    loss_ds = torch.mean(torch.abs(x_fake - x_fake2))
+
+    # cycle-consistency loss
+    masks = nets.fan.get_heatmap(x_fake) if args.w_hpf > 0 else None
+    s_org = nets.style_encoder(x_real, y_org)
+    x_rec = nets.generator(x_fake, s_org, masks=masks)
+    loss_cyc = torch.mean(torch.abs(x_rec - x_real))
+
+    # perceptual loss
+    perceptual_loss = self.compute_perceptual_loss(x_real, x_fake)
+
+    # identity loss
+    if y_org == y_trg:
+        x_identity = nets.generator(x_real, s_trg, masks=masks)
+        loss_id = torch.mean(torch.abs(x_identity - x_real))
+    else:
+        loss_id = 0
+
+    loss = loss_adv + args.lambda_sty * loss_sty \
+           - args.lambda_ds * loss_ds + args.lambda_cyc * loss_cyc \
+           + args.lambda_perc * perceptual_loss + args.lambda_id * loss_id
+    return loss, Munch(adv=loss_adv.item(),
+                       sty=loss_sty.item(),
+                       ds=loss_ds.item(),
+                       cyc=loss_cyc.item(),
+                       perc=perceptual_loss.item(),
+                       id=loss_id)
+
 
 def moving_average(model, model_test, beta=0.999):
     for param, param_test in zip(model.parameters(), model_test.parameters()):
         param_test.data = torch.lerp(param.data, param_test.data, beta)
 
+
 def adv_loss(logits, target):
     assert target in [1, 0]
     targets = torch.full_like(logits, fill_value=target)
-    loss = F.binary_cross_entropy_with_logits(logits, targets)
+    loss = F.mse_loss(torch.sigmoid(logits), targets)  # LSGAN loss
     return loss
+
 
 def r1_reg(d_out, x_in):
     # zero-centered gradient penalty for real images
