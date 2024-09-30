@@ -1,94 +1,109 @@
-import argparse
 import os
+import argparse
+
 from munch import Munch
+from torch.backends import cudnn
+import torch
+
+from core.data_loader import get_train_loader
+from core.data_loader import get_test_loader
 from core.solver import Solver
-from core.data_loader import get_train_loader, get_eval_loader, get_test_loader
 
-def parse_args():
-    parser = argparse.ArgumentParser()
+def str2bool(v):
+    return v.lower() in ('true')
 
-    # Data parameters
-    parser.add_argument('--train_img_dir', type=str, default='data/celeba_hq/train', help='Directory containing training images')
-    parser.add_argument('--val_img_dir', type=str, default='data/celeba_hq/val', help='Directory containing validation images')
-    parser.add_argument('--src_dir', type=str, default='assets/representative/celeba_hq/src', help='Source directory for test images')
-    parser.add_argument('--ref_dir', type=str, default='assets/representative/celeba_hq/ref', help='Reference directory for test images')
-
-    # New argument for number of domains
-    parser.add_argument('--num_domains', type=int, default=2, help='Number of domains (e.g., attributes) for StarGAN v2')
-
-    # Training parameters
-    parser.add_argument('--img_size', type=int, default=256, help='Image resolution')
-    parser.add_argument('--style_dim', type=int, default=64, help='Dimension of the style code')
-    parser.add_argument('--latent_dim', type=int, default=16, help='Dimension of the latent code')  # ADD this line
-    parser.add_argument('--batch_size', type=int, default=8, help='Mini-batch size')
-    parser.add_argument('--val_batch_size', type=int, default=32, help='Batch size for validation')
-    parser.add_argument('--num_workers', type=int, default=4, help='Number of workers for data loading')
-    parser.add_argument('--total_iters', type=int, default=100000, help='Number of training iterations')
-    parser.add_argument('--resume_iter', type=int, default=0, help='Resume training from this iteration')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--f_lr', type=float, default=1e-6, help='Learning rate for mapping network')
-    parser.add_argument('--beta1', type=float, default=0.0, help='Beta1 for Adam optimizer')
-    parser.add_argument('--beta2', type=float, default=0.99, help='Beta2 for Adam optimizer')
-    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for optimizer')
-
-    # Loss hyperparameters
-    parser.add_argument('--lambda_sty', type=float, default=1.0, help='Weight for style reconstruction loss')
-    parser.add_argument('--lambda_cyc', type=float, default=10.0, help='Weight for cycle consistency loss')
-    parser.add_argument('--lambda_ds', type=float, default=1.0, help='Weight for diversity-sensitive loss')
-
-    # New hyperparameters for perceptual and identity loss
-    parser.add_argument('--lambda_perc', type=float, default=10.0, help='Weight for perceptual loss')
-    parser.add_argument('--lambda_id', type=float, default=5.0, help='Weight for identity loss')
-
-    # Miscellaneous parameters
-    parser.add_argument('--mode', type=str, required=True, choices=['train', 'sample', 'eval'], help='Mode of operation: train, sample, eval')
-    parser.add_argument('--sample_dir', type=str, default='expr/samples', help='Directory for saving generated samples')
-    parser.add_argument('--checkpoint_dir', type=str, default='expr/checkpoints', help='Directory for saving model checkpoints')
-    parser.add_argument('--result_dir', type=str, default='expr/results', help='Directory for saving results')
-    parser.add_argument('--eval_dir', type=str, default='expr/eval', help='Directory for saving evaluation metrics')
-    parser.add_argument('--wing_path', type=str, default='expr/checkpoints/wing.pth', help='Path to pre-trained FAN model')
-    parser.add_argument('--lm_path', type=str, default='expr/checkpoints/celeba_lm_mean.npz', help='Path to precomputed CelebA landmark mean')
-    parser.add_argument('--randcrop_prob', type=float, default=0.5, help='Probability of applying random crop')
-    parser.add_argument('--w_hpf', type=int, default=1, help='Weight for high-pass filtering')
-    parser.add_argument('--print_every', type=int, default=1000, help='Print logs every N iterations')
-    parser.add_argument('--sample_every', type=int, default=5000, help='Save sample images every N iterations')
-    parser.add_argument('--save_every', type=int, default=10000, help='Save model checkpoints every N iterations')
-    parser.add_argument('--eval_every', type=int, default=50000, help='Evaluate FID and LPIPS every N iterations')
-
-    return parser.parse_args()
+def subdirs(dname):
+    return [d for d in os.listdir(dname)
+            if os.path.isdir(os.path.join(dname, d))]
 
 def main(args):
-    # Initialize the solver
+    print(args)
+    cudnn.benchmark = True
+    torch.manual_seed(args.seed)
+
     solver = Solver(args)
 
-    # Choose the mode of operation
     if args.mode == 'train':
-        # Training mode
-        loaders = Munch(src=get_train_loader(args.train_img_dir, which='source', img_size=args.img_size,
-                                             batch_size=args.batch_size, prob=args.randcrop_prob, num_workers=args.num_workers),
-                        ref=get_train_loader(args.train_img_dir, which='reference', img_size=args.img_size,
-                                             batch_size=args.batch_size, prob=args.randcrop_prob, num_workers=args.num_workers),
-                        val=get_eval_loader(args.val_img_dir, img_size=args.img_size, batch_size=args.val_batch_size))
-
-        # Start training
+        assert len(subdirs(args.train_img_dir)) == args.num_domains
+        assert len(subdirs(args.val_img_dir)) == args.num_domains
+        loaders = Munch(src=get_train_loader(root=args.train_img_dir,
+                                             which='source',
+                                             img_size=args.img_size,
+                                             batch_size=args.batch_size,
+                                             prob=args.randcrop_prob,
+                                             num_workers=args.num_workers),
+                        ref=get_train_loader(root=args.train_img_dir,
+                                             which='reference',
+                                             img_size=args.img_size,
+                                             batch_size=args.batch_size,
+                                             prob=args.randcrop_prob,
+                                             num_workers=args.num_workers),
+                        val=get_test_loader(root=args.val_img_dir,
+                                            img_size=args.img_size,
+                                            batch_size=args.val_batch_size,
+                                            shuffle=True,
+                                            num_workers=args.num_workers))
         solver.train(loaders)
-
     elif args.mode == 'sample':
-        # Sampling mode
-        loaders = Munch(src=get_test_loader(args.src_dir, img_size=args.img_size, batch_size=args.val_batch_size),
-                        ref=get_test_loader(args.ref_dir, img_size=args.img_size, batch_size=args.val_batch_size))
-        
+        assert len(subdirs(args.src_dir)) == args.num_domains
+        assert len(subdirs(args.ref_dir)) == args.num_domains
+        loaders = Munch(src=get_test_loader(root=args.src_dir,
+                                            img_size=args.img_size,
+                                            batch_size=args.val_batch_size,
+                                            shuffle=False,
+                                            num_workers=args.num_workers),
+                        ref=get_test_loader(root=args.ref_dir,
+                                            img_size=args.img_size,
+                                            batch_size=args.val_batch_size,
+                                            shuffle=False,
+                                            num_workers=args.num_workers))
         solver.sample(loaders)
-
     elif args.mode == 'eval':
-        # Evaluation mode
         solver.evaluate()
+    elif args.mode == 'align':
+        from core.wing import align_faces
+        align_faces(args, args.inp_dir, args.out_dir)
+    else:
+        raise NotImplementedError
 
 if __name__ == '__main__':
-    args = parse_args()
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
-    os.makedirs(args.sample_dir, exist_ok=True)
-    os.makedirs(args.result_dir, exist_ok=True)
-    os.makedirs(args.eval_dir, exist_ok=True)
+    parser = argparse.ArgumentParser()
 
+    # Model arguments
+    parser.add_argument('--img_size', type=int, default=256, help='Image resolution')
+    parser.add_argument('--num_domains', type=int, default=2, help='Number of domains')
+    parser.add_argument('--latent_dim', type=int, default=16, help='Latent vector dimension')
+    parser.add_argument('--hidden_dim', type=int, default=512, help='Hidden dimension of mapping network')
+    parser.add_argument('--style_dim', type=int, default=64, help='Style code dimension')
+
+    # Weight for objective functions
+    parser.add_argument('--lambda_reg', type=float, default=1, help='Weight for R1 regularization')
+    parser.add_argument('--lambda_cyc', type=float, default=1, help='Weight for cyclic consistency loss')
+    parser.add_argument('--lambda_sty', type=float, default=1, help='Weight for style reconstruction loss')
+    parser.add_argument('--lambda_ds', type=float, default=1, help='Weight for diversity sensitive loss')
+    parser.add_argument('--ds_iter', type=int, default=100000, help='Number of iterations to optimize diversity sensitive loss')
+    parser.add_argument('--w_hpf', type=float, default=1, help='weight for high-pass filtering')
+
+    # New parameter for perceptual loss
+    parser.add_argument('--lambda_perc', type=float, default=0.1, help='Weight for perceptual loss')
+
+    # Training arguments
+    parser.add_argument('--randcrop_prob', type=float, default=0.5, help='Probabilty of using random-resized cropping')
+    parser.add_argument('--total_iters', type=int, default=100000, help='Number of total iterations')
+    parser.add_argument('--resume_iter', type=int, default=0, help='Iterations to resume training/testing')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
+    parser.add_argument('--val_batch_size', type=int, default=32, help='Batch size for validation')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate for D, E, and G')
+    parser.add_argument('--f_lr', type=float, default=1e-6, help='Learning rate for F')
+    parser.add_argument('--beta1', type=float, default=0.0, help='Decay rate for 1st moment of Adam')
+    parser.add_argument('--beta2', type=float, default=0.99, help='Decay rate for 2nd moment of Adam')
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for optimizer')
+    parser.add_argument('--num_outs_per_domain', type=int, default=10, help='Number of generated images per domain during sampling')
+
+    # Miscellaneous
+    parser.add_argument('--mode', type=str, required=True, choices=['train', 'sample', 'eval', 'align'], help='This argument is used in solver')
+    parser.add_argument('--num_workers', type=int, default=4, help='Number of workers used in DataLoader')
+    parser.add_argument('--seed', type=int, default=777, help='Seed for random number generator')
+
+    args = parser.parse_args()
     main(args)

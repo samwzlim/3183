@@ -1,311 +1,203 @@
-import copy
-import math
+from pathlib import Path
+from itertools import chain
+import os
+import random
+
 from munch import Munch
+from PIL import Image
 import numpy as np
+
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from core.wing import FAN
-
-# Self-attention module added
-class SelfAttention(nn.Module):
-    def __init__(self, in_dim):
-        super(SelfAttention, self).__init__()
-        self.query = nn.Conv2d(in_dim, in_dim // 8, kernel_size=1)
-        self.key = nn.Conv2d(in_dim, in_dim // 8, kernel_size=1)
-        self.value = nn.Conv2d(in_dim, in_dim, kernel_size=1)
-        self.gamma = nn.Parameter(torch.zeros(1))
-
-    def forward(self, x):
-        B, C, W, H = x.size()
-        proj_query = self.query(x).view(B, -1, W * H).permute(0, 2, 1)
-        proj_key = self.key(x).view(B, -1, W * H)
-        energy = torch.bmm(proj_query, proj_key)
-        attention = F.softmax(energy, dim=-1)
-
-        proj_value = self.value(x).view(B, -1, W * H)
-        out = torch.bmm(proj_value, attention.permute(0, 2, 1))
-        out = out.view(B, C, W, H)
-        out = self.gamma * out + x
-        return out
-
-class ResBlk(nn.Module):
-    def __init__(self, dim_in, dim_out, actv=nn.LeakyReLU(0.2),
-                 normalize=False, downsample=False):
-        super().__init__()
-        self.actv = actv
-        self.normalize = normalize
-        self.downsample = downsample
-        self.learned_sc = dim_in != dim_out
-        self._build_weights(dim_in, dim_out)
-
-    def _build_weights(self, dim_in, dim_out):
-        self.conv1 = nn.Conv2d(dim_in, dim_in, 3, 1, 1)
-        self.conv2 = nn.Conv2d(dim_in, dim_out, 3, 1, 1)
-        if self.normalize:
-            self.norm1 = nn.InstanceNorm2d(dim_in, affine=True)
-            self.norm2 = nn.InstanceNorm2d(dim_in, affine=True)
-        if self.learned_sc:
-            self.conv1x1 = nn.Conv2d(dim_in, dim_out, 1, 1, 0, bias=False)
-
-    def _shortcut(self, x):
-        if self.learned_sc:
-            x = self.conv1x1(x)
-        if self.downsample:
-            x = F.avg_pool2d(x, 2)
-        return x
-
-    def _residual(self, x):
-        if self.normalize:
-            x = self.norm1(x)
-        x = self.actv(x)
-        x = self.conv1(x)
-        if self.downsample:
-            x = F.avg_pool2d(x, 2)
-        if self.normalize:
-            x = self.norm2(x)
-        x = self.actv(x)
-        x = self.conv2(x)
-        return x
-
-    def forward(self, x):
-        x = self._shortcut(x) + self._residual(x)
-        return x / math.sqrt(2)  # unit variance
+from torch.utils import data
+from torch.utils.data.sampler import WeightedRandomSampler
+from torchvision import transforms
+from torchvision.datasets import ImageFolder
 
 
-class AdaIN(nn.Module):
-    def __init__(self, style_dim, num_features):
-        super().__init__()
-        self.norm = nn.InstanceNorm2d(num_features, affine=False)
-        self.fc = nn.Linear(style_dim, num_features*2)
-
-    def forward(self, x, s):
-        h = self.fc(s)
-        h = h.view(h.size(0), h.size(1), 1, 1)
-        gamma, beta = torch.chunk(h, chunks=2, dim=1)
-        return (1 + gamma) * self.norm(x) + beta
+def listdir(dname):
+    fnames = list(chain(*[list(Path(dname).rglob('*.' + ext))
+                          for ext in ['png', 'jpg', 'jpeg', 'JPG']]))
+    return fnames
 
 
-class AdainResBlk(nn.Module):
-    def __init__(self, dim_in, dim_out, style_dim=64, w_hpf=0,
-                 actv=nn.LeakyReLU(0.2), upsample=False):
-        super().__init__()
-        self.w_hpf = w_hpf
-        self.actv = actv
-        self.upsample = upsample
-        self.learned_sc = dim_in != dim_out
-        self._build_weights(dim_in, dim_out, style_dim)
+class DefaultDataset(data.Dataset):
+    def __init__(self, root, transform=None):
+        self.samples = listdir(root)
+        self.samples.sort()
+        self.transform = transform
+        self.targets = None
 
-    def _build_weights(self, dim_in, dim_out, style_dim=64):
-        self.conv1 = nn.Conv2d(dim_in, dim_out, 3, 1, 1)
-        self.conv2 = nn.Conv2d(dim_out, dim_out, 3, 1, 1)
-        self.norm1 = AdaIN(style_dim, dim_in)
-        self.norm2 = AdaIN(style_dim, dim_out)
-        if self.learned_sc:
-            self.conv1x1 = nn.Conv2d(dim_in, dim_out, 1, 1, 0, bias=False)
+    def __getitem__(self, index):
+        fname = self.samples[index]
+        img = Image.open(fname).convert('RGB')
+        if self.transform is not None:
+            img = self.transform(img)
+        return img
 
-    def _shortcut(self, x):
-        if self.upsample:
-            x = F.interpolate(x, scale_factor=2, mode='nearest')
-        if self.learned_sc:
-            x = self.conv1x1(x)
-        return x
-
-    def _residual(self, x, s):
-        x = self.norm1(x, s)
-        x = self.actv(x)
-        if self.upsample:
-            x = F.interpolate(x, scale_factor=2, mode='nearest')
-        x = self.conv1(x)
-        x = self.norm2(x, s)
-        x = self.actv(x)
-        x = self.conv2(x)
-        return x
-
-    def forward(self, x, s):
-        out = self._residual(x, s)
-        if self.w_hpf == 0:
-            out = (out + self._shortcut(x)) / math.sqrt(2)
-        return out
+    def __len__(self):
+        return len(self.samples)
 
 
-class HighPass(nn.Module):
-    def __init__(self, w_hpf, device):
-        super(HighPass, self).__init__()
-        self.register_buffer('filter',
-                             torch.tensor([[-1, -1, -1],
-                                           [-1, 8., -1],
-                                           [-1, -1, -1]]) / w_hpf)
+class ReferenceDataset(data.Dataset):
+    def __init__(self, root, transform=None):
+        self.samples, self.targets = self._make_dataset(root)
+        self.transform = transform
 
-    def forward(self, x):
-        filter = self.filter.unsqueeze(0).unsqueeze(1).repeat(x.size(1), 1, 1, 1)
-        return F.conv2d(x, filter, padding=1, groups=x.size(1))
+    def _make_dataset(self, root):
+        domains = os.listdir(root)
+        fnames, fnames2, labels = [], [], []
+        for idx, domain in enumerate(sorted(domains)):
+            class_dir = os.path.join(root, domain)
+            cls_fnames = listdir(class_dir)
+            fnames += cls_fnames
+            fnames2 += random.sample(cls_fnames, len(cls_fnames))
+            labels += [idx] * len(cls_fnames)
+        return list(zip(fnames, fnames2)), labels
 
+    def __getitem__(self, index):
+        fname, fname2 = self.samples[index]
+        label = self.targets[index]
+        img = Image.open(fname).convert('RGB')
+        img2 = Image.open(fname2).convert('RGB')
+        if self.transform is not None:
+            img = self.transform(img)
+            img2 = self.transform(img2)
+        return img, img2, label
 
-class Generator(nn.Module):
-    def __init__(self, img_size=256, style_dim=64, max_conv_dim=512, w_hpf=1):
-        super().__init__()
-        dim_in = 2**14 // img_size
-        self.img_size = img_size
-        self.from_rgb = nn.Conv2d(3, dim_in, 3, 1, 1)
-        self.encode = nn.ModuleList()
-        self.decode = nn.ModuleList()
-        self.attention_layer = SelfAttention(dim_in)  # Added attention layer
-        self.to_rgb = nn.Sequential(
-            nn.InstanceNorm2d(dim_in, affine=True),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(dim_in, 3, 1, 1, 0))
-
-        # down/up-sampling blocks
-        repeat_num = int(np.log2(img_size)) - 4
-        if w_hpf > 0:
-            repeat_num += 1
-        for _ in range(repeat_num):
-            dim_out = min(dim_in*2, max_conv_dim)
-            self.encode.append(ResBlk(dim_in, dim_out, normalize=True, downsample=True))
-            self.decode.insert(0, AdainResBlk(dim_out, dim_in, style_dim, w_hpf=w_hpf, upsample=True))  
-            dim_in = dim_out
-
-        # bottleneck blocks
-        for _ in range(2):
-            self.encode.append(ResBlk(dim_out, dim_out, normalize=True))
-            self.decode.insert(0, AdainResBlk(dim_out, dim_out, style_dim, w_hpf=w_hpf))
-
-        if w_hpf > 0:
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            self.hpf = HighPass(w_hpf, device)
-
-    def forward(self, x, s, masks=None):
-        x = self.from_rgb(x)
-        cache = {}
-        for block in self.encode:
-            if (masks is not None) and (x.size(2) in [32, 64, 128]):
-                cache[x.size(2)] = x
-            x = block(x)
-        x = self.attention_layer(x)  # Add attention before decoding
-        for block in self.decode:
-            x = block(x, s)
-            if (masks is not None) and (x.size(2) in [32, 64, 128]):
-                mask = masks[0] if x.size(2) in [32] else masks[1]
-                mask = F.interpolate(mask, size=x.size(2), mode='bilinear')
-                x = x + self.hpf(mask * cache[x.size(2)])
-        return self.to_rgb(x)
+    def __len__(self):
+        return len(self.targets)
 
 
-class MappingNetwork(nn.Module):
-    def __init__(self, latent_dim=16, style_dim=64, num_domains=2):
-        super().__init__()
-        layers = []
-        layers += [nn.Linear(latent_dim, 512)]
-        layers += [nn.ReLU()]
-        for _ in range(3):
-            layers += [nn.Linear(512, 512)]
-            layers += [nn.ReLU()]
-        self.shared = nn.Sequential(*layers)
-
-        self.unshared = nn.ModuleList()
-        for _ in range(num_domains):
-            self.unshared += [nn.Sequential(nn.Linear(512, 512),
-                                            nn.ReLU(),
-                                            nn.Linear(512, 512),
-                                            nn.ReLU(),
-                                            nn.Linear(512, 512),
-                                            nn.ReLU(),
-                                            nn.Linear(512, style_dim))]
-
-    def forward(self, z, y):
-        h = self.shared(z)
-        out = []
-        for layer in self.unshared:
-            out += [layer(h)]
-        out = torch.stack(out, dim=1)  # (batch, num_domains, style_dim)
-        idx = torch.LongTensor(range(y.size(0))).to(y.device)
-        s = out[idx, y]  # (batch, style_dim)
-        return s
+def _make_balanced_sampler(labels):
+    class_counts = np.bincount(labels)
+    class_weights = 1. / class_counts
+    weights = class_weights[labels]
+    return WeightedRandomSampler(weights, len(weights))
 
 
-class StyleEncoder(nn.Module):
-    def __init__(self, img_size=256, style_dim=64, num_domains=2, max_conv_dim=512):
-        super().__init__()
-        dim_in = 2**14 // img_size
-        blocks = []
-        blocks += [nn.Conv2d(3, dim_in, 3, 1, 1)]
+def get_train_loader(root, which='source', img_size=256,
+                     batch_size=8, prob=0.5, num_workers=4):
+    print('Preparing DataLoader to fetch %s images '
+          'during the training phase...' % which)
 
-        repeat_num = int(np.log2(img_size)) - 2
-        for _ in range(repeat_num):
-            dim_out = min(dim_in*2, max_conv_dim)
-            blocks += [ResBlk(dim_in, dim_out, downsample=True)]
-            dim_in = dim_out
+    crop = transforms.RandomResizedCrop(
+        img_size, scale=[0.8, 1.0], ratio=[0.9, 1.1])
+    rand_crop = transforms.Lambda(
+        lambda x: crop(x) if random.random() < prob else x)
 
-        blocks += [nn.LeakyReLU(0.2)]
-        blocks += [nn.Conv2d(dim_out, dim_out, 4, 1, 0)]
-        blocks += [nn.LeakyReLU(0.2)]
-        self.shared = nn.Sequential(*blocks)
+    transform = transforms.Compose([
+        rand_crop,
+        transforms.Resize([img_size, img_size]),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5],
+                             std=[0.5, 0.5, 0.5]),
+    ])
 
-        self.unshared = nn.ModuleList()
-        for _ in range(num_domains):
-            self.unshared += [nn.Linear(dim_out, style_dim)]
+    if which == 'source':
+        dataset = ImageFolder(root, transform)
+    elif which == 'reference':
+        dataset = ReferenceDataset(root, transform)
+    else:
+        raise NotImplementedError
 
-    def forward(self, x, y):
-        h = self.shared(x)
-        h = h.view(h.size(0), -1)
-        out = []
-        for layer in self.unshared:
-            out += [layer(h)]
-        out = torch.stack(out, dim=1)  # (batch, num_domains, style_dim)
-        idx = torch.LongTensor(range(y.size(0))).to(y.device)
-        s = out[idx, y]  # (batch, style_dim)
-        return s
-
-
-class Discriminator(nn.Module):
-    def __init__(self, img_size=256, num_domains=2, max_conv_dim=512):
-        super().__init__()
-        dim_in = 2**14 // img_size
-        blocks = []
-        blocks += [nn.Conv2d(3, dim_in, 3, 1, 1)]
-
-        repeat_num = int(np.log2(img_size)) - 2
-        for _ in range(repeat_num):
-            dim_out = min(dim_in*2, max_conv_dim)
-            blocks += [ResBlk(dim_in, dim_out, downsample=True)]
-            dim_in = dim_out
-
-        blocks += [nn.LeakyReLU(0.2)]
-        blocks += [nn.Conv2d(dim_out, dim_out, 4, 1, 0)]
-        blocks += [nn.LeakyReLU(0.2)]
-        blocks += [nn.Conv2d(dim_out, num_domains, 1, 1, 0)]
-        self.main = nn.Sequential(*blocks)
-
-    def forward(self, x, y):
-        out = self.main(x)
-        out = out.view(out.size(0), -1)  # (batch, num_domains)
-        idx = torch.LongTensor(range(y.size(0))).to(y.device)
-        out = out[idx, y]  # (batch)
-        return out
+    sampler = _make_balanced_sampler(dataset.targets)
+    return data.DataLoader(dataset=dataset,
+                           batch_size=batch_size,
+                           sampler=sampler,
+                           num_workers=num_workers,
+                           pin_memory=True,
+                           drop_last=True)
 
 
-def build_model(args):
-    generator = nn.DataParallel(Generator(args.img_size, args.style_dim, w_hpf=args.w_hpf))
-    mapping_network = nn.DataParallel(MappingNetwork(args.latent_dim, args.style_dim, args.num_domains))
-    style_encoder = nn.DataParallel(StyleEncoder(args.img_size, args.style_dim, args.num_domains))
-    discriminator = nn.DataParallel(Discriminator(args.img_size, args.num_domains))
-    generator_ema = copy.deepcopy(generator)
-    mapping_network_ema = copy.deepcopy(mapping_network)
-    style_encoder_ema = copy.deepcopy(style_encoder)
+def get_eval_loader(root, img_size=256, batch_size=32,
+                    imagenet_normalize=True, shuffle=True,
+                    num_workers=4, drop_last=False):
+    print('Preparing DataLoader for the evaluation phase...')
+    if imagenet_normalize:
+        height, width = 299, 299
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+    else:
+        height, width = img_size, img_size
+        mean = [0.5, 0.5, 0.5]
+        std = [0.5, 0.5, 0.5]
 
-    nets = Munch(generator=generator,
-                 mapping_network=mapping_network,
-                 style_encoder=style_encoder,
-                 discriminator=discriminator)
-    nets_ema = Munch(generator=generator_ema,
-                     mapping_network=mapping_network_ema,
-                     style_encoder=style_encoder_ema)
+    transform = transforms.Compose([
+        transforms.Resize([img_size, img_size]),
+        transforms.Resize([height, width]),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=mean, std=std)
+    ])
 
-    if args.w_hpf > 0:
-        fan = nn.DataParallel(FAN(fname_pretrained=args.wing_path).eval())
-        fan.get_heatmap = fan.module.get_heatmap
-        nets.fan = fan
-        nets_ema.fan = fan
+    dataset = DefaultDataset(root, transform=transform)
+    return data.DataLoader(dataset=dataset,
+                           batch_size=batch_size,
+                           shuffle=shuffle,
+                           num_workers=num_workers,
+                           pin_memory=True,
+                           drop_last=drop_last)
 
-    return nets, nets_ema
+
+def get_test_loader(root, img_size=256, batch_size=32,
+                    shuffle=True, num_workers=4):
+    print('Preparing DataLoader for the generation phase...')
+    transform = transforms.Compose([
+        transforms.Resize([img_size, img_size]),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5],
+                             std=[0.5, 0.5, 0.5]),
+    ])
+
+    dataset = ImageFolder(root, transform)
+    return data.DataLoader(dataset=dataset,
+                           batch_size=batch_size,
+                           shuffle=shuffle,
+                           num_workers=num_workers,
+                           pin_memory=True)
+
+
+class InputFetcher:
+    def __init__(self, loader, loader_ref=None, latent_dim=16, mode=''):
+        self.loader = loader
+        self.loader_ref = loader_ref
+        self.latent_dim = latent_dim
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.mode = mode
+
+    def _fetch_inputs(self):
+        try:
+            x, y = next(self.iter)
+        except (AttributeError, StopIteration):
+            self.iter = iter(self.loader)
+            x, y = next(self.iter)
+        return x, y
+
+    def _fetch_refs(self):
+        try:
+            x, x2, y = next(self.iter_ref)
+        except (AttributeError, StopIteration):
+            self.iter_ref = iter(self.loader_ref)
+            x, x2, y = next(self.iter_ref)
+        return x, x2, y
+
+    def __next__(self):
+        x, y = self._fetch_inputs()
+        if self.mode == 'train':
+            x_ref, x_ref2, y_ref = self._fetch_refs()
+            z_trg = torch.randn(x.size(0), self.latent_dim)
+            z_trg2 = torch.randn(x.size(0), self.latent_dim)
+            inputs = Munch(x_src=x, y_src=y, y_ref=y_ref,
+                           x_ref=x_ref, x_ref2=x_ref2,
+                           z_trg=z_trg, z_trg2=z_trg2)
+        elif self.mode == 'val':
+            x_ref, y_ref = self._fetch_inputs()
+            inputs = Munch(x_src=x, y_src=y,
+                           x_ref=x_ref, y_ref=y_ref)
+        elif self.mode == 'test':
+            inputs = Munch(x=x, y=y)
+        else:
+            raise NotImplementedError
+
+        return Munch({k: v.to(self.device)
+                      for k, v in inputs.items()})

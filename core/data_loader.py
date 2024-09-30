@@ -4,7 +4,7 @@ import os
 import random
 
 from munch import Munch
-from PIL import Image, ImageOps
+from PIL import Image
 import numpy as np
 
 import torch
@@ -29,7 +29,7 @@ class DefaultDataset(data.Dataset):
 
     def __getitem__(self, index):
         fname = self.samples[index]
-        img = Image.open(fname).convert('RGB')  # Convert grayscale to RGB
+        img = Image.open(fname).convert('RGB')
         if self.transform is not None:
             img = self.transform(img)
         return img
@@ -89,8 +89,6 @@ def get_train_loader(root, which='source', img_size=256,
         rand_crop,
         transforms.Resize([img_size, img_size]),
         transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(degrees=15),  # Added rotation
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),  # Added color jitter
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5],
                              std=[0.5, 0.5, 0.5]),

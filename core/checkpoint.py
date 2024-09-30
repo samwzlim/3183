@@ -1,6 +1,7 @@
 import os
 import torch
 
+
 class CheckpointIO(object):
     def __init__(self, fname_template, data_parallel=False, **kwargs):
         os.makedirs(os.path.dirname(fname_template), exist_ok=True)
@@ -36,4 +37,4 @@ class CheckpointIO(object):
             if self.data_parallel:
                 module.module.load_state_dict(module_dict[name], strict=False)
             else:
-                module.load_state_dict(module_dict[name])
+                module.load_state_dict(module_dict[name], strict=False)
