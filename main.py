@@ -8,9 +8,6 @@ http://creativecommons.org/licenses/by-nc/4.0/ or send a letter to
 Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
 """
 
-import sys
-sys.path.append('/content/latent-diffusion')  # Ensure latent-diffusion is in Python path
-
 import os
 import argparse
 
@@ -33,7 +30,7 @@ def subdirs(dname):
 
 
 def main(args):
-    print(args, flush=True)
+    print(args)
     cudnn.benchmark = True
     torch.manual_seed(args.seed)
 
@@ -42,94 +39,38 @@ def main(args):
     if args.mode == 'train':
         assert len(subdirs(args.train_img_dir)) == args.num_domains
         assert len(subdirs(args.val_img_dir)) == args.num_domains
-        loaders = Munch(src=get_train_loader(args=args,
-                                             root=args.train_img_dir,
-                                             mask_dir = args.train_mask_dir,
+        loaders = Munch(src=get_train_loader(root=args.train_img_dir,
                                              which='source',
                                              img_size=args.img_size,
                                              batch_size=args.batch_size,
                                              prob=args.randcrop_prob,
                                              num_workers=args.num_workers),
-                        ref=get_train_loader(args=args,
-                                             root=args.train_img_dir,
-                                             mask_dir = args.train_mask_dir,
+                        ref=get_train_loader(root=args.train_img_dir,
                                              which='reference',
                                              img_size=args.img_size,
                                              batch_size=args.batch_size,
                                              prob=args.randcrop_prob,
                                              num_workers=args.num_workers),
-                        val=get_test_loader(args=args,
-                                            root=args.val_img_dir,
-                                            mask_dir = args.val_mask_dir,
+                        val=get_test_loader(root=args.val_img_dir,
                                             img_size=args.img_size,
                                             batch_size=args.val_batch_size,
                                             shuffle=True,
                                             num_workers=args.num_workers))
         solver.train(loaders)
-        loaders_sample = Munch(src=get_test_loader(args=args,
-                                            root=args.src_dir,
-                                            mask_dir = args.src_mask_dir,
-                                            img_size=args.img_size,
-                                            batch_size=args.val_batch_size,
-                                            shuffle=False,
-                                            num_workers=args.num_workers),
-                        ref=get_test_loader(args=args,
-                                            root=args.ref_dir,
-                                            mask_dir = args.ref_mask_dir,
-                                            img_size=args.img_size,
-                                            batch_size=args.val_batch_size,
-                                            shuffle=False,
-                                            num_workers=args.num_workers))
-        solver.sample(loaders_sample)
-        solver.evaluate()
     elif args.mode == 'sample':
         assert len(subdirs(args.src_dir)) == args.num_domains
         assert len(subdirs(args.ref_dir)) == args.num_domains
-        loaders = Munch(src=get_test_loader(args=args,
-                                            root=args.src_dir,
-                                            mask_dir = args.src_mask_dir,
+        loaders = Munch(src=get_test_loader(root=args.src_dir,
                                             img_size=args.img_size,
                                             batch_size=args.val_batch_size,
                                             shuffle=False,
                                             num_workers=args.num_workers),
-                        ref=get_test_loader(args=args,
-                                            root=args.ref_dir,
-                                            mask_dir = args.ref_mask_dir,
+                        ref=get_test_loader(root=args.ref_dir,
                                             img_size=args.img_size,
                                             batch_size=args.val_batch_size,
                                             shuffle=False,
                                             num_workers=args.num_workers))
         solver.sample(loaders)
-    elif args.mode == 'sample_fid':
-        solver.sample_fid()
-    elif args.mode == 'debug_image':
-        assert len(subdirs(args.train_img_dir)) == args.num_domains
-        assert len(subdirs(args.val_img_dir)) == args.num_domains
-        torch.manual_seed(args.seed)
-        loaders = Munch(src=get_train_loader(args=args,
-                                             root=args.train_img_dir,
-                                             mask_dir = args.train_mask_dir,
-                                             which='source',
-                                             img_size=args.img_size,
-                                             batch_size=args.batch_size,
-                                             prob=args.randcrop_prob,
-                                             num_workers=args.num_workers),
-                        ref=get_train_loader(args=args,
-                                             root=args.train_img_dir,
-                                             mask_dir = args.train_mask_dir,
-                                             which='reference',
-                                             img_size=args.img_size,
-                                             batch_size=args.batch_size,
-                                             prob=args.randcrop_prob,
-                                             num_workers=args.num_workers),
-                        val=get_test_loader(args=args,
-                                            root=args.val_img_dir,
-                                            mask_dir = args.val_mask_dir,
-                                            img_size=args.img_size,
-                                            batch_size=args.val_batch_size,
-                                            shuffle=True,
-                                            num_workers=args.num_workers))
-        solver.debug_image(loaders)
     elif args.mode == 'eval':
         solver.evaluate()
     elif args.mode == 'align':
@@ -142,24 +83,6 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
-    # background arguments
-    parser.add_argument('--stego_path', type=str, default='')
-    parser.add_argument('--background_separation', action='store_true', help='Use background separation')
-    parser.add_argument('--mask_input', action='store_true', help='Use stego to mask inputs')
-    parser.add_argument('--mask_reference', action='store_true', help='Use stego to mask references')
-    parser.add_argument('--visualize_mask', action='store_true', help='Visualize mask')
-    parser.add_argument('--use_sean_encoder', action='store_true', help='Use sean encoder')
-    parser.add_argument('--use_torch_compile', action='store_true', help='Use torch compile to speed up on A100')
-    parser.add_argument('--gpu_id', type=int, default=0,
-                        help='GPU id')
-    parser.add_argument('--name', type=str, default='stargan',
-                        help='Project name')
-    parser.add_argument('--use_cross_attention', action='store_true', help='Use cross attention instead of AdaIN')
-    parser.add_argument('--use_self_attention', action='store_true', help='Use self attention for style code')
-    parser.add_argument('--lpips_path', type=str, default='projects/stargan-v2/metrics/lpips_weights.ckpt')
-
-    
-    
     # model arguments
     parser.add_argument('--img_size', type=int, default=256,
                         help='Image resolution')
@@ -212,7 +135,7 @@ if __name__ == '__main__':
 
     # misc
     parser.add_argument('--mode', type=str, required=True,
-                        choices=['train', 'sample', 'eval', 'align','sample_fid', 'debug_image'],
+                        choices=['train', 'sample', 'eval', 'align'],
                         help='This argument is used in solver')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of workers used in DataLoader')
@@ -222,10 +145,6 @@ if __name__ == '__main__':
     # directory for training
     parser.add_argument('--train_img_dir', type=str, default='data/celeba_hq/train',
                         help='Directory containing training images')
-    parser.add_argument('--train_mask_dir', type=str, default='data/celeba_hq/mask',
-                        help='Directory containing training mask images')
-    parser.add_argument('--val_mask_dir', type=str, default='data/celeba_hq/mask',
-                        help='Directory containing validation mask images')
     parser.add_argument('--val_img_dir', type=str, default='data/celeba_hq/val',
                         help='Directory containing validation images')
     parser.add_argument('--sample_dir', type=str, default='expr/samples',
@@ -242,12 +161,8 @@ if __name__ == '__main__':
                         help='Directory for saving generated images and videos')
     parser.add_argument('--src_dir', type=str, default='assets/representative/celeba_hq/src',
                         help='Directory containing input source images')
-    parser.add_argument('--src_mask_dir', type=str, default='data/celeba_hq/mask',
-                        help='Directory containing src mask images')
     parser.add_argument('--ref_dir', type=str, default='assets/representative/celeba_hq/ref',
                         help='Directory containing input reference images')
-    parser.add_argument('--ref_mask_dir', type=str, default='data/celeba_hq/mask',
-                        help='Directory containing ref mask images')
     parser.add_argument('--inp_dir', type=str, default='assets/representative/custom/female',
                         help='input directory when aligning faces')
     parser.add_argument('--out_dir', type=str, default='assets/representative/celeba_hq/src/female',
@@ -264,8 +179,4 @@ if __name__ == '__main__':
     parser.add_argument('--eval_every', type=int, default=50000)
 
     args = parser.parse_args()
-    print("Checkpoints dir: " , args.checkpoint_dir)
-    print("Background separation: ", args.background_separation)
-    print("Mask input: ", args.mask_input)
-    print("Mask reference: ", args.mask_reference)
     main(args)
