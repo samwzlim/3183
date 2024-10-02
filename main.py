@@ -8,6 +8,9 @@ http://creativecommons.org/licenses/by-nc/4.0/ or send a letter to
 Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
 """
 
+import sys
+sys.path.append('/content/latent-diffusion')  # Ensure latent-diffusion is in Python path
+
 import os
 import argparse
 
