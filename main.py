@@ -99,6 +99,34 @@ def main(args):
         solver.sample(loaders)
     elif args.mode == 'sample_fid':
         solver.sample_fid()
+    elif args.mode == 'debug_image':
+        assert len(subdirs(args.train_img_dir)) == args.num_domains
+        assert len(subdirs(args.val_img_dir)) == args.num_domains
+        torch.manual_seed(args.seed)
+        loaders = Munch(src=get_train_loader(args=args,
+                                             root=args.train_img_dir,
+                                             mask_dir = args.train_mask_dir,
+                                             which='source',
+                                             img_size=args.img_size,
+                                             batch_size=args.batch_size,
+                                             prob=args.randcrop_prob,
+                                             num_workers=args.num_workers),
+                        ref=get_train_loader(args=args,
+                                             root=args.train_img_dir,
+                                             mask_dir = args.train_mask_dir,
+                                             which='reference',
+                                             img_size=args.img_size,
+                                             batch_size=args.batch_size,
+                                             prob=args.randcrop_prob,
+                                             num_workers=args.num_workers),
+                        val=get_test_loader(args=args,
+                                            root=args.val_img_dir,
+                                            mask_dir = args.val_mask_dir,
+                                            img_size=args.img_size,
+                                            batch_size=args.val_batch_size,
+                                            shuffle=True,
+                                            num_workers=args.num_workers))
+        solver.debug_image(loaders)
     elif args.mode == 'eval':
         solver.evaluate()
     elif args.mode == 'align':
@@ -181,7 +209,7 @@ if __name__ == '__main__':
 
     # misc
     parser.add_argument('--mode', type=str, required=True,
-                        choices=['train', 'sample', 'eval', 'align','sample_fid'],
+                        choices=['train', 'sample', 'eval', 'align','sample_fid', 'debug_image'],
                         help='This argument is used in solver')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of workers used in DataLoader')

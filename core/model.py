@@ -299,13 +299,12 @@ class StyleEncoderSEAN(nn.Module):
         h = self.shared(x)
         resize = torchvision.transforms.Resize((64,64),antialias=True)
         mask = resize(mask)
-         
+        
         # SEAN encoder
         b_size = h.shape[0]
         s_size = mask.shape[1]
         f_size = h.shape[1]
         codes_vector = torch.zeros((b_size, s_size, f_size), dtype=h.dtype, device=h.device)
-
 
         for i in range(b_size):
             for j in range(s_size):
