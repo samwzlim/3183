@@ -32,7 +32,7 @@ class Solver(nn.Module):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         self.nets, self.nets_ema = build_model(args)
-        # Below setattrs are to make networks be children of Solver, e.g., for self.to(self.device)
+        # below setattrs are to make networks be children of Solver, e.g., for self.to(self.device)
         for name, module in self.nets.items():
             utils.print_network(module, name)
             setattr(self, name, module)
@@ -82,22 +82,22 @@ class Solver(nn.Module):
         nets_ema = self.nets_ema
         optims = self.optims
 
-        # Fetch random validation images for debugging
+        # fetch random validation images for debugging
         fetcher = InputFetcher(loaders.src, loaders.ref, args.latent_dim, 'train')
         fetcher_val = InputFetcher(loaders.val, None, args.latent_dim, 'val')
         inputs_val = next(fetcher_val)
 
-        # Resume training if necessary
+        # resume training if necessary
         if args.resume_iter > 0:
             self._load_checkpoint(args.resume_iter)
 
-        # Remember the initial value of ds weight
+        # remember the initial value of ds weight
         initial_lambda_ds = args.lambda_ds
 
         print('Start training...')
         start_time = time.time()
         for i in range(args.resume_iter, args.total_iters):
-            # Fetch images and labels
+            # fetch images and labels
             inputs = next(fetcher)
             x_real, y_org = inputs.x_src, inputs.y_src
             x_ref, x_ref2, y_trg = inputs.x_ref, inputs.x_ref2, inputs.y_ref
@@ -105,21 +105,20 @@ class Solver(nn.Module):
 
             masks = nets.fan.get_heatmap(x_real) if args.w_hpf > 0 else None
 
-            # Train the discriminator with latent style
+            # train the discriminator
             d_loss, d_losses_latent = compute_d_loss(
                 nets, args, x_real, y_org, y_trg, z_trg=z_trg, masks=masks)
             self._reset_grad()
             d_loss.backward()
             optims.discriminator.step()
 
-            # Train the discriminator with reference style
             d_loss, d_losses_ref = compute_d_loss(
                 nets, args, x_real, y_org, y_trg, x_ref=x_ref, masks=masks)
             self._reset_grad()
             d_loss.backward()
             optims.discriminator.step()
 
-            # Train the generator with latent style
+            # train the generator
             g_loss, g_losses_latent = compute_g_loss(
                 nets, args, x_real, y_org, y_trg, z_trgs=[z_trg, z_trg2], masks=masks)
             self._reset_grad()
@@ -128,27 +127,26 @@ class Solver(nn.Module):
             optims.mapping_network.step()
             optims.style_encoder.step()
 
-            # Train the generator with reference style
             g_loss, g_losses_ref = compute_g_loss(
                 nets, args, x_real, y_org, y_trg, x_refs=[x_ref, x_ref2], masks=masks)
             self._reset_grad()
             g_loss.backward()
             optims.generator.step()
 
-            # Compute moving average of network parameters
+            # compute moving average of network parameters
             moving_average(nets.generator, nets_ema.generator, beta=0.999)
             moving_average(nets.mapping_network, nets_ema.mapping_network, beta=0.999)
             moving_average(nets.style_encoder, nets_ema.style_encoder, beta=0.999)
 
-            # Decay weight for diversity sensitive loss
+            # decay weight for diversity sensitive loss
             if args.lambda_ds > 0:
                 args.lambda_ds -= (initial_lambda_ds / args.ds_iter)
 
-            # Print out log info
-            if (i + 1) % args.print_every == 0:
+            # print out log info
+            if (i+1) % args.print_every == 0:
                 elapsed = time.time() - start_time
                 elapsed = str(datetime.timedelta(seconds=elapsed))[:-7]
-                log = "Elapsed time [%s], Iteration [%i/%i], " % (elapsed, i + 1, args.total_iters)
+                log = "Elapsed time [%s], Iteration [%i/%i], " % (elapsed, i+1, args.total_iters)
                 all_losses = dict()
                 for loss, prefix in zip([d_losses_latent, d_losses_ref, g_losses_latent, g_losses_ref],
                                         ['D/latent_', 'D/ref_', 'G/latent_', 'G/ref_']):
@@ -158,19 +156,19 @@ class Solver(nn.Module):
                 log += ' '.join(['%s: [%.4f]' % (key, value) for key, value in all_losses.items()])
                 print(log)
 
-            # Generate images for debugging
-            if (i + 1) % args.sample_every == 0:
+            # generate images for debugging
+            if (i+1) % args.sample_every == 0:
                 os.makedirs(args.sample_dir, exist_ok=True)
-                utils.debug_image(nets_ema, args, inputs=inputs_val, step=i + 1)
+                utils.debug_image(nets_ema, args, inputs=inputs_val, step=i+1)
 
-            # Save model checkpoints
-            if (i + 1) % args.save_every == 0:
-                self._save_checkpoint(step=i + 1)
+            # save model checkpoints
+            if (i+1) % args.save_every == 0:
+                self._save_checkpoint(step=i+1)
 
-            # Compute FID and LPIPS if necessary
-            if (i + 1) % args.eval_every == 0:
-                calculate_metrics(nets_ema, args, i + 1, mode='latent')
-                calculate_metrics(nets_ema, args, i + 1, mode='reference')
+            # compute FID and LPIPS if necessary
+            if (i+1) % args.eval_every == 0:
+                calculate_metrics(nets_ema, args, i+1, mode='latent')
+                calculate_metrics(nets_ema, args, i+1, mode='reference')
 
     @torch.no_grad()
     def sample(self, loaders):
@@ -202,13 +200,13 @@ class Solver(nn.Module):
 
 def compute_d_loss(nets, args, x_real, y_org, y_trg, z_trg=None, x_ref=None, masks=None):
     assert (z_trg is None) != (x_ref is None)
-    # With real images
+    # with real images
     x_real.requires_grad_()
     out = nets.discriminator(x_real, y_org)
     loss_real = adv_loss(out, 1)
     loss_reg = r1_reg(out, x_real)
 
-    # With fake images
+    # with fake images
     with torch.no_grad():
         if z_trg is not None:
             s_trg = nets.mapping_network(z_trg, y_trg)
@@ -232,7 +230,7 @@ def compute_g_loss(nets, args, x_real, y_org, y_trg, z_trgs=None, x_refs=None, m
     if x_refs is not None:
         x_ref, x_ref2 = x_refs
 
-    # Adversarial loss
+    # adversarial loss
     if z_trgs is not None:
         s_trg = nets.mapping_network(z_trg, y_trg)
     else:
@@ -242,11 +240,11 @@ def compute_g_loss(nets, args, x_real, y_org, y_trg, z_trgs=None, x_refs=None, m
     out = nets.discriminator(x_fake, y_trg)
     loss_adv = adv_loss(out, 1)
 
-    # Style reconstruction loss
+    # style reconstruction loss
     s_pred = nets.style_encoder(x_fake, y_trg)
     loss_sty = torch.mean(torch.abs(s_pred - s_trg))
 
-    # Diversity sensitive loss
+    # diversity sensitive loss
     if z_trgs is not None:
         s_trg2 = nets.mapping_network(z_trg2, y_trg)
     else:
@@ -255,7 +253,7 @@ def compute_g_loss(nets, args, x_real, y_org, y_trg, z_trgs=None, x_refs=None, m
     x_fake2 = x_fake2.detach()
     loss_ds = torch.mean(torch.abs(x_fake - x_fake2))
 
-    # Cycle-consistency loss
+    # cycle-consistency loss
     masks = nets.fan.get_heatmap(x_fake) if args.w_hpf > 0 else None
     s_org = nets.style_encoder(x_real, y_org)
     x_rec = nets.generator(x_fake, s_org, masks=masks)
@@ -282,7 +280,7 @@ def adv_loss(logits, target):
 
 
 def r1_reg(d_out, x_in):
-    # Zero-centered gradient penalty for real images
+    # zero-centered gradient penalty for real images
     batch_size = x_in.size(0)
     grad_dout = torch.autograd.grad(
         outputs=d_out.sum(), inputs=x_in,
