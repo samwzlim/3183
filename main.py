@@ -82,6 +82,10 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    
+    # version
+    parser.add_argument('--version', type=str, required=False,
+                        help="Name of experiment")
 
     # model arguments
     parser.add_argument('--img_size', type=int, default=256,
@@ -155,6 +159,8 @@ if __name__ == '__main__':
     # directory for calculating metrics
     parser.add_argument('--eval_dir', type=str, default='expr/eval',
                         help='Directory for saving metrics, i.e., FID and LPIPS')
+    parser.add_argument('--save_sources', type=bool, default=False,
+                        help='whether to save source and reference images during eval phase')
 
     # directory for testing
     parser.add_argument('--result_dir', type=str, default='expr/results',

@@ -8,6 +8,7 @@ http://creativecommons.org/licenses/by-nc/4.0/ or send a letter to
 Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
 """
 
+import sys
 import os
 import shutil
 from collections import OrderedDict
@@ -53,7 +54,10 @@ def calculate_metrics(nets, args, step, mode):
                                          imagenet_normalize=False)
 
             task = '%s2%s' % (src_domain, trg_domain)
-            path_fake = os.path.join(args.eval_dir, task)
+            if args.version:
+                path_fake = os.path.join(args.version, args.eval_dir, task)
+            else:
+                path_fake = os.path.join(args.eval_dir, task)
             shutil.rmtree(path_fake, ignore_errors=True)
             os.makedirs(path_fake)
 
@@ -62,11 +66,15 @@ def calculate_metrics(nets, args, step, mode):
             for i, x_src in enumerate(tqdm(loader_src, total=len(loader_src))):
                 N = x_src.size(0)
                 x_src = x_src.to(device)
+                # sys.exit()
                 y_trg = torch.tensor([trg_idx] * N).to(device)
                 masks = nets.fan.get_heatmap(x_src) if args.w_hpf > 0 else None
 
                 # generate 10 outputs from the same input
+                group_of_src = []
+                group_of_ref = []
                 group_of_images = []
+                group_of_src.append(x_src)
                 for j in range(args.num_outs_per_domain):
                     if mode == 'latent':
                         z_trg = torch.randn(N, args.latent_dim).to(device)
@@ -77,20 +85,31 @@ def calculate_metrics(nets, args, step, mode):
                         except:
                             iter_ref = iter(loader_ref)
                             x_ref = next(iter_ref).to(device)
-
+                        group_of_ref.append(x_ref)
+                        
                         if x_ref.size(0) > N:
                             x_ref = x_ref[:N]
                         s_trg = nets.style_encoder(x_ref, y_trg)
-
+                        if args.save_sources:
+                            for k in range(N):
+                                filename_ref = os.path.join(path_fake, 
+                                        '%.4i_ref.png' % (i*args.val_batch_size+(k+1)))
+                                filename_src = os.path.join(path_fake, 
+                                        '%.4i_src.png' % (i*args.val_batch_size+(k+1)))
+                                utils.save_image(x_ref[k], ncol=1, filename=filename_ref)
+                                utils.save_image(x_src[k], ncol=1, filename=filename_src)
+                            
                     x_fake = nets.generator(x_src, s_trg, masks=masks)
                     group_of_images.append(x_fake)
-
                     # save generated images to calculate FID later
                     for k in range(N):
                         filename = os.path.join(
                             path_fake,
                             '%.4i_%.2i.png' % (i*args.val_batch_size+(k+1), j+1))
+                        
                         utils.save_image(x_fake[k], ncol=1, filename=filename)
+                        # utils.save_image(x_fake[k], ncol=1, filename=filename)
+                        # utils.save_image(x_fake[k], ncol=1, filename=filename)
 
                 lpips_value = calculate_lpips_given_images(group_of_images)
                 lpips_values.append(lpips_value)
@@ -112,14 +131,14 @@ def calculate_metrics(nets, args, step, mode):
     lpips_dict['LPIPS_%s/mean' % mode] = lpips_mean
 
     # report LPIPS values
-    filename = os.path.join(args.eval_dir, 'LPIPS_%.5i_%s.json' % (step, mode))
+    filename = os.path.join(args.eval_dir, 'LPIPS_%.5i_%s_%s.json' % (step, mode, args.version))
     utils.save_json(lpips_dict, filename)
 
     # calculate and report fid values
-    calculate_fid_for_all_tasks(args, domains, step=step, mode=mode)
+    calculate_fid_for_all_tasks(args, domains, step=step, mode=mode, version=args.version)
 
 
-def calculate_fid_for_all_tasks(args, domains, step, mode):
+def calculate_fid_for_all_tasks(args, domains, step, mode, version):
     print('Calculating FID for all tasks...')
     fid_values = OrderedDict()
     for trg_domain in domains:
@@ -143,5 +162,5 @@ def calculate_fid_for_all_tasks(args, domains, step, mode):
     fid_values['FID_%s/mean' % mode] = fid_mean
 
     # report FID values
-    filename = os.path.join(args.eval_dir, 'FID_%.5i_%s.json' % (step, mode))
+    filename = os.path.join(args.eval_dir, 'FID_%.5i_%s_%s.json' % (step, mode, version))
     utils.save_json(fid_values, filename)
