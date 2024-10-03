@@ -24,6 +24,7 @@ from core.wing import FAN
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 
+
 class ResBlk(nn.Module):
     def __init__(self, dim_in, dim_out, actv=nn.LeakyReLU(0.2),
                  normalize=False, downsample=False):
@@ -72,7 +73,7 @@ class AdaIN(nn.Module):
     def __init__(self, style_dim, num_features):
         super().__init__()
         self.norm = nn.InstanceNorm2d(num_features, affine=False)
-        self.fc = nn.Linear(style_dim, num_features*2)
+        self.fc = nn.Linear(style_dim, num_features * 2)
 
     def forward(self, x, s):
         h = self.fc(s)
@@ -137,10 +138,24 @@ class HighPass(nn.Module):
         return F.conv2d(x, filter, padding=1, groups=x.size(1))
 
 
+class TransformerBlock(nn.Module):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.1):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = Attention(dim, heads, dim_head, dropout)
+        self.norm2 = nn.LayerNorm(dim)
+        self.ff = FeedForward(dim, hidden_dim=dim * 4, dropout=dropout)
+
+    def forward(self, x):
+        x = x + self.attn(self.norm1(x))
+        x = x + self.ff(self.norm2(x))
+        return x
+
+
 class Generator(nn.Module):
     def __init__(self, img_size=256, style_dim=64, max_conv_dim=512, w_hpf=1):
         super().__init__()
-        dim_in = 2**14 // img_size
+        dim_in = 2 ** 14 // img_size
         self.img_size = img_size
         self.from_rgb = nn.Conv2d(3, dim_in, 3, 1, 1)
         self.encode = nn.ModuleList()
@@ -149,13 +164,13 @@ class Generator(nn.Module):
             nn.InstanceNorm2d(dim_in, affine=True),
             nn.LeakyReLU(0.2),
             nn.Conv2d(dim_in, 3, 1, 1, 0))
-
+        
         # down/up-sampling blocks
         repeat_num = int(np.log2(img_size)) - 4
         if w_hpf > 0:
             repeat_num += 1
         for _ in range(repeat_num):
-            dim_out = min(dim_in*2, max_conv_dim)
+            dim_out = min(dim_in * 2, max_conv_dim)
             self.encode.append(
                 ResBlk(dim_in, dim_out, normalize=True, downsample=True))
             self.decode.insert(
@@ -169,6 +184,9 @@ class Generator(nn.Module):
                 ResBlk(dim_out, dim_out, normalize=True))
             self.decode.insert(
                 0, AdainResBlk(dim_out, dim_out, style_dim, w_hpf=w_hpf))
+        
+        # Transformer block integration
+        self.transformer = TransformerBlock(dim=dim_out, heads=8, dim_head=64, dropout=0.1)
 
         if w_hpf > 0:
             device = torch.device(
@@ -182,6 +200,8 @@ class Generator(nn.Module):
             if (masks is not None) and (x.size(2) in [32, 64, 128]):
                 cache[x.size(2)] = x
             x = block(x)
+        # Integrate Transformer Block after encoding
+        x = self.transformer(x)
         for block in self.decode:
             x = block(x, s)
             if (masks is not None) and (x.size(2) in [32, 64, 128]):
@@ -226,13 +246,13 @@ class MappingNetwork(nn.Module):
 class StyleEncoder(nn.Module):
     def __init__(self, img_size=256, style_dim=64, num_domains=2, max_conv_dim=512):
         super().__init__()
-        dim_in = 2**14 // img_size
+        dim_in = 2 ** 14 // img_size
         blocks = []
         blocks += [nn.Conv2d(3, dim_in, 3, 1, 1)]
 
         repeat_num = int(np.log2(img_size)) - 2
         for _ in range(repeat_num):
-            dim_out = min(dim_in*2, max_conv_dim)
+            dim_out = min(dim_in * 2, max_conv_dim)
             blocks += [ResBlk(dim_in, dim_out, downsample=True)]
             dim_in = dim_out
 
@@ -260,13 +280,13 @@ class StyleEncoder(nn.Module):
 class Discriminator(nn.Module):
     def __init__(self, img_size=256, num_domains=2, max_conv_dim=512):
         super().__init__()
-        dim_in = 2**14 // img_size
+        dim_in = 2 ** 14 // img_size
         blocks = []
         blocks += [nn.Conv2d(3, dim_in, 3, 1, 1)]
 
         repeat_num = int(np.log2(img_size)) - 2
         for _ in range(repeat_num):
-            dim_out = min(dim_in*2, max_conv_dim)
+            dim_out = min(dim_in * 2, max_conv_dim)
             blocks += [ResBlk(dim_in, dim_out, downsample=True)]
             dim_in = dim_out
 
@@ -324,22 +344,21 @@ class ScaledDotProductAttention(nn.Module):
         attn = F.softmax(score, -1)
         context = torch.bmm(attn, value)
         return context, attn
-        
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, heads = 8, dim_head = 64, dropout = 0.):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.):
         super().__init__()
-        inner_dim = dim_head *  heads
+        inner_dim = dim_head * heads
         project_out = not (heads == 1 and dim_head == dim)
 
         self.heads = heads
         self.scale = dim_head ** -0.5
 
-        self.attend = nn.Softmax(dim = -1)
+        self.attend = nn.Softmax(dim=-1)
         self.dropout = nn.Dropout(dropout)
 
-        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
 
         self.to_out = nn.Sequential(
             nn.Linear(inner_dim, dim),
@@ -347,8 +366,8 @@ class Attention(nn.Module):
         ) if project_out else nn.Identity()
 
     def forward(self, x):
-        qkv = self.to_qkv(x).chunk(3, dim = -1)
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), qkv)
+        qkv = self.to_qkv(x).chunk(3, dim=-1)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=self.heads), qkv)
 
         dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
 
@@ -358,10 +377,10 @@ class Attention(nn.Module):
         out = torch.matmul(attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
-        
+
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, hidden_dim, dropout = 0.):
+    def __init__(self, dim, hidden_dim, dropout=0.):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim, hidden_dim),
@@ -370,5 +389,6 @@ class FeedForward(nn.Module):
             nn.Linear(hidden_dim, dim),
             nn.Dropout(dropout)
         )
+
     def forward(self, x):
         return self.net(x)
