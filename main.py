@@ -82,9 +82,13 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    
+
+    # version
+    parser.add_argument('--version', type=str, required=False,
+                        help="Name of experiment")
+
     # model arguments
-    parser.add_argument('--img_size', type=int, default=128,  # Modified to 128 for faster training
+    parser.add_argument('--img_size', type=int, default=256,
                         help='Image resolution')
     parser.add_argument('--num_domains', type=int, default=2,
                         help='Number of domains')
@@ -104,7 +108,7 @@ if __name__ == '__main__':
                         help='Weight for style reconstruction loss')
     parser.add_argument('--lambda_ds', type=float, default=1,
                         help='Weight for diversity sensitive loss')
-    parser.add_argument('--ds_iter', type=int, default=1000,  # Modified for 1000 iterations
+    parser.add_argument('--ds_iter', type=int, default=100000,
                         help='Number of iterations to optimize diversity sensitive loss')
     parser.add_argument('--w_hpf', type=float, default=1,
                         help='weight for high-pass filtering')
@@ -112,7 +116,7 @@ if __name__ == '__main__':
     # training arguments
     parser.add_argument('--randcrop_prob', type=float, default=0.5,
                         help='Probabilty of using random-resized cropping')
-    parser.add_argument('--total_iters', type=int, default=1000,  # Reduced to 1000 iterations
+    parser.add_argument('--total_iters', type=int, default=100000,
                         help='Number of total iterations')
     parser.add_argument('--resume_iter', type=int, default=0,
                         help='Iterations to resume training/testing')
@@ -173,11 +177,10 @@ if __name__ == '__main__':
     parser.add_argument('--lm_path', type=str, default='expr/checkpoints/celeba_lm_mean.npz')
 
     # step size
-    parser.add_argument('--print_every', type=int, default=10)  # Keep this low for faster feedback
-    parser.add_argument('--sample_every', type=int, default=100,  # Reduced to generate samples more often
-                        help='Sample images every X iterations')
-    parser.add_argument('--save_every', type=int, default=500,  # Save model more frequently due to short training
-                        help='Save model checkpoints every X iterations')
-    parser.add_argument('--eval_every', type=int, default=1000)  # Eval at the end of training
+    parser.add_argument('--print_every', type=int, default=10)
+    parser.add_argument('--sample_every', type=int, default=5000)
+    parser.add_argument('--save_every', type=int, default=10000)
+    parser.add_argument('--eval_every', type=int, default=50000)
+
     args = parser.parse_args()
     main(args)
