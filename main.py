@@ -141,7 +141,7 @@ if __name__ == '__main__':
     parser.add_argument('--mode', type=str, required=True,
                         choices=['train', 'sample', 'eval', 'align'],
                         help='This argument is used in solver')
-    parser.add_argument('--num_workers', type=int, default=4,
+    parser.add_argument('--num_workers', type=int, default=2,
                         help='Number of workers used in DataLoader')
     parser.add_argument('--seed', type=int, default=777,
                         help='Seed for random number generator')
